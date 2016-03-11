@@ -7,14 +7,21 @@ uses
   Dialogs, StdCtrls, ExtCtrls;
 
 const
-//количество записываемых пакетов. за раз 
-NUM_WRITE_POCKET=100;
+//количество записываемых пакетов. за раз
+NUM_WRITE_POCKET=5000;//100;
 //размерность пакета записи, в частности пакета ИРУТ(28)
 POCKETSIZE=28;
-//N=100;
+N=100;
 //N=512;
-N=4096;
-
+//N=4096;
+//количество пакетов в секунду
+NUM_POCKET_IN_SEC=2000;
+//частота опроса(дискретизации) медленных; Гц
+SAMPLING_FREQ_SLOW=10;
+//количество каналов медленных
+NUM_SLOW_CHANAL=5;
+//количество байт данных в пакете ГЕОС . 30 слов по 4 байта
+NUM_BYTE_IN_GEOS_POCKET=120;
 type
   TSignalGenForm = class(TForm)
     startGen: TButton;
@@ -42,6 +49,47 @@ type
 
 
   byteArray=array of byte;
+  wordArray=array of word;
+
+  TSlowPar=array[1..NUM_SLOW_CHANAL] of word;
+
+  TGeosRec=record
+    //1 слово GEOS 4 байта
+    //колич. секунд от 1 января 2008 года  .8б
+    time:int64;
+    //широта. радианы 8б
+    latitude:double;
+    //долгота. радианы 8б
+    longtitude:double;
+    //высота над элипсоидом 8б
+    hOnElps:double;
+    //отклонение элипсоида от геоида 8б
+    deflGeoid:double;
+    //число КА 4
+    KAnum:integer;
+    //состояние приемника 4
+    transStatus:integer;
+    //GDOP 8
+    gDop:double;
+    //PDOP 8
+    pDop:double;
+    //TDOP 8
+    tDop:double;
+    //HDOP 8
+    hDop:double;
+    //VDOP 8
+    vDop:double;
+    //флаг достоверности 4
+    flagD:integer;
+    //колл. дост. решений  4
+    countDes:integer;
+    //скорость  8
+    planV:double;
+    //курс 8
+    kurs:double;
+    //контр. сумма 8
+    sum:int64;
+  end;
 
 
 var
@@ -49,19 +97,21 @@ var
   SignalGenForm: TSignalGenForm;
   //счетчик пакетов для частоты вывода
   pocketCount:integer;
+  fileStream:TFileStream;
   //счетчик пакетов для пуменрации запис. пакетов. 0..65535
   pocketCountWWrite:word;
-  fileStream:TFileStream;
+  geosPocket:TGeosRec;
+
   //массив - пакет сигнала
   signalPocket: array[1..POCKETSIZE] of byte;
-  {data: array[1..N] of byte = (127,162,185,188,172,143,115,98,101,124,158,192,
+  Data: array[1..N] of byte = (127,162,185,188,172,143,115,98,101,124,158,192,
                                215,217,200,170,141,123,124,145,178,210,231,232,
                                212,181,149,129,128,147,177,208,227,225,204,171,
                                137,115,112,129,158,187,204,201,179,144,109,86,
                                82,98,126,154,171,168,146,111,76,53,49,65,94,
                                123,141,139,118,84,50,28,26,44,74,105,
                                124,125,105,74,42,22,22,41,74,107,128,131,114,
-                               84,54,36,38,59,93,128,151,155,140,111,83,65,68,90);}
+                               84,54,36,38,59,93,128,151,155,140,111,83,65,68,90);
 
    {data: array[1..N] of byte = (127,142,158,172,187,200,212,223,232,240,245,249,
                                 251,251,249,245,240,232,223,212,200,187,173,158,
@@ -113,7 +163,7 @@ var
                                 230,238,244,248);}
 
 
-  Data: array[1..N] of byte =
+{  Data: array[1..N] of byte =
 (252,251,248,243,236,227,217,206,193,179,164,149,133,117,101,85,71,57,44,32,
 23,14,8,4,2,2,4,8,14,22,32,44,57,71,86,102,119,135,152,168,
 183,198,211,222,232,240,246,250,251,251,248,242,235,226,214,201,187,172,155,138,
@@ -318,7 +368,7 @@ var
 10,94,204,251,199,88,8,24,122,224,247,173,61,2,43,152,240,236,144,37,
 3,69,182,249,218,112,18,12,99,209,251,192,80,5,30,133,231,244,161,50,
 2,55,167,246,227,127,26,7,87,199,251,202,91,9,23,123,225,247,169,57,
-2,49,161,244,230,131,28,6,84,196,251,203,92,9,23,123);
+2,49,161,244,230,131,28,6,84,196,251,203,92,9,23,123);}
 
 
 
@@ -326,14 +376,37 @@ var
   arrayOfByte:byteArray;
   //счетчик номера позиции в байтовом массиве
   iArrayOfByte:integer;
+  //массив слов значений записываемых в файл
+  wordArr:wordArray;
+  //счетчик номера позиции в массиве слов
+  iWordArr:integer;
   //счетчик перебора данных сигнального массива
   dataCount:integer;
   countWriteByteInFile:cardinal;
+  //храним значение медленных
+  slowVal:word;
 
   //бинарный файл сигнала
   signalFile:file;
 
+
+  //массив медленных параметров
+  arrSlowParam:TSlowPar;
+  pocketOffset:integer;
+  countReadSlowP:integer;
+
+  //счетчик прошедших секунд
+  timeCount:integer;
+
+  //счетчик выборки из массива слов
+  wordCount:integer;
+  koef:integer;
+  koefVibSlowP:integer;
+  pocketOffsetSlowP:integer;
+  flag:boolean;
 implementation
+
+uses Math;
 
 {$R *.dfm}
 
@@ -378,6 +451,121 @@ end;
 //==============================================================================
 
 
+//==============================================================================
+//Запись медленных в пакет. Возвращает записаное значение медленных
+//==============================================================================
+procedure WriteSlowVal(pocketCount:word; var offsetCount:integer;
+  var arrSlowP:TSlowPar; var iArrSlowPPrev:integer);
+begin
+//pocketCount-номер пакета, offsetCount-смещение для записи значений быстрых в нужные пакеты
+//arrSlowP-массив значений медленных параметров для заполнения файла
+//iArrSlowPPrev-счетчик для правильной выборки повторяющихся значений медленных
+
+//запись в пакет медленных 2 байта медленных. Всего их 10. 5 раз по 2 байта
+
+//запись медленных с 0 пакета
+
+
+if (pocketCount mod (round(NUM_POCKET_IN_SEC/SAMPLING_FREQ_SLOW)+(offsetCount-1)))=0 then
+  begin
+    arrSlowP[offsetCount]:=Random(High(word));
+    WriteByteToByte(arrSlowP[offsetCount],arrayOfByte,iArrayOfByte);
+    inc(offsetCount);
+    if offsetCount>NUM_SLOW_CHANAL then
+      begin
+        offsetCount:=1;
+      end;
+  end
+else
+  begin
+    WriteByteToByte(arrSlowP[iArrSlowPPrev],arrayOfByte,iArrayOfByte);
+    inc(iArrSlowPPrev);
+    if iArrSlowPPrev>NUM_SLOW_CHANAL then
+      begin
+        iArrSlowPPrev:=1;
+      end;
+  end;
+end;
+//==============================================================================
+
+//==============================================================================
+//Запись данных с ГЕОС пакет
+//==============================================================================
+procedure WriteGEOSParam(pocketCount:word; var offsetCount:integer);
+begin
+//запись в пакет с ГЕОС
+if (pocketCount mod (NUM_POCKET_IN_SEC+offsetCount))=0 then
+  begin
+
+  end;
+
+end;
+//==============================================================================
+
+
+//==============================================================================
+//Запись данных в массив слов
+//==============================================================================
+procedure WriteToWordArray(multiByteValue: integer; var  arrayOfWord:wordArray;
+  var arrayIndex:integer); overload;
+var
+  j: integer;
+begin
+  j:=1;
+  while j<=SizeOf(multiByteValue) do
+  begin
+    //заказали байт под данные
+    SetLength(arrayOfWord,arrayIndex+1);
+    //накладываем маску 2 байта
+    arrayOfWord[arrayIndex] := multiByteValue and 65535;
+    inc(arrayIndex);
+    //сдвигаем по 2 байта
+    multiByteValue := multiByteValue shr 16;
+    j:=j+2;
+  end;
+end;
+
+procedure WriteToWordArray(multiByteValue: int64; var  arrayOfWord:wordArray;
+  var arrayIndex:integer); overload;
+var
+  j: integer;
+begin
+  j:=1;
+  while j<=SizeOf(multiByteValue) do
+  begin
+    //заказали байт под данные
+    SetLength(arrayOfWord,arrayIndex+1);
+    //накладываем маску 2 байта
+    arrayOfWord[arrayIndex] := multiByteValue and 65535;
+    inc(arrayIndex);
+    //сдвигаем по 2 байта
+    multiByteValue := multiByteValue shr 16;
+    j:=j+2;
+  end;
+end;
+
+procedure WriteToWordArray(multiByteValue: double; var  arrayOfWord:wordArray;
+  var arrayIndex:integer); overload;
+var
+  j: integer;
+  Pword: ^word;
+begin
+  j:=1;
+  Pword:=@multiByteValue;
+  while j<=SizeOf(multiByteValue) do
+  begin
+    //заказали байт под данные
+    SetLength(arrayOfWord,arrayIndex+1);
+    arrayOfWord[arrayIndex]:=pWord^;
+    inc(arrayIndex);
+    inc(pWord);
+    j:=j+2;
+  end;
+end;
+
+//==============================================================================
+
+
 
 //==============================================================================
 //Генератор пакета
@@ -385,15 +573,15 @@ end;
 procedure GenPocket(var pocketC:integer);
 var
 i:integer;
+wordNull:word;
 begin
-//запись счетчика. 2 байта
- WriteByteToByte(pocketCountWWrite,arrayOfByte,iArrayOfByte);
- inc(pocketCountWWrite);
- //проверка на переполнения
- if pocketCountWWrite>High(pocketCountWWrite) then
+{if pocketCountWWrite=2046 then
   begin
-    pocketCountWWrite:=0;
-  end;
+    ShowMessage('11');
+  end;}
+
+//запись счетчика. 2 байта
+WriteByteToByte(pocketCountWWrite,arrayOfByte,iArrayOfByte);
 
 //запись быстрых. 24 байта
 for i:=1 to POCKETSIZE-4 do
@@ -409,13 +597,157 @@ for i:=1 to POCKETSIZE-4 do
   inc(dataCount);
   i:=i+2;
 
-//медл. 2 байта
- //заполнили медленные параметры
-while i<=POCKETSIZE do
+
+//сформируем значения с ГЕОС. И запишем их в массив слов по 2байта
+//формируем каждые 2000
+if (pocketCountWWrite mod NUM_POCKET_IN_SEC)=0 then
   begin
-    //в тестовом режиме заполним единицами
-    WriteByteToByte(dataCount,arrayOfByte,iArrayOfByte);
-    inc(i);
+    //пришел новый пакет данных с ГЕОС,
+    //сбросим массив слов и счетчик слов
+    wordArr:=nil;
+    iWordArr:=0;
+
+    geosPocket.time:=timeCount;
+    WriteToWordArray(geosPocket.time,wordArr,iWordArr);
+    inc(timeCount);
+    if timeCount>=High(timeCount) then
+      begin
+        timeCount:=0;
+      end;
+    geosPocket.latitude:=0.947817116;
+    WriteToWordArray(geosPocket.latitude,wordArr,iWordArr);
+    geosPocket.longtitude:=0.639544114;
+    WriteToWordArray(geosPocket.longtitude,wordArr,iWordArr);
+    geosPocket.hOnElps:=10.0;
+    WriteToWordArray(geosPocket.hOnElps,wordArr,iWordArr);
+    geosPocket.deflGeoid:=10.0;
+    WriteToWordArray(geosPocket.deflGeoid,wordArr,iWordArr);
+    geosPocket.KAnum:=1;
+    WriteToWordArray(geosPocket.KAnum,wordArr,iWordArr);
+    geosPocket.transStatus:=10;
+    WriteToWordArray(geosPocket.transStatus,wordArr,iWordArr);
+    geosPocket.gDop:=10.0;
+    WriteToWordArray(geosPocket.gDop,wordArr,iWordArr);
+    geosPocket.pDop:=10.0;
+    WriteToWordArray(geosPocket.pDop,wordArr,iWordArr);
+    geosPocket.tDop:=10.0;
+    WriteToWordArray(geosPocket.tDop,wordArr,iWordArr);
+    geosPocket.hDop:=10.0;
+    WriteToWordArray(geosPocket.hDop,wordArr,iWordArr);
+    geosPocket.vDop:=10.0;
+    WriteToWordArray(geosPocket.vDop,wordArr,iWordArr);
+    geosPocket.flagD:=1;
+    WriteToWordArray(geosPocket.flagD,wordArr,iWordArr);
+    geosPocket.countDes:=10;
+    WriteToWordArray(geosPocket.countDes,wordArr,iWordArr);
+    //зададим скорость случайным образом от 30 до 150 км\ч
+    geosPocket.planV:=RandomRange(30,150);
+    WriteToWordArray(geosPocket.planV,wordArr,iWordArr);
+    geosPocket.kurs:=111.0;
+    WriteToWordArray(geosPocket.kurs,wordArr,iWordArr);
+    geosPocket.sum:=777;
+    WriteToWordArray(geosPocket.sum,wordArr,iWordArr);
+  end;
+
+
+//запись данных с ГЕОС
+//NUM_BYTE_IN_GEOS_POCKET/2-сколько пакетов должны заполнить 0..59
+if ((pocketCountWWrite>=0) and (pocketCountWWrite<=(NUM_BYTE_IN_GEOS_POCKET/2)-1)) then
+  begin
+  { if pocketCountWWrite=56 then
+    begin
+      ShowMessage('333');
+    end;}
+
+   WriteByteToByte(wordArr[wordCount],arrayOfByte,iArrayOfByte);
+   inc(wordCount);
+   //проверяем не последний ли это заполняемый пакет в начале
+   if (pocketCountWWrite=(NUM_BYTE_IN_GEOS_POCKET/2)-1) then
+    begin
+      wordCount:=0;
+    end;
+  end
+else
+  begin
+    {if pocketCountWWrite=3000 then
+      begin
+        ShowMessage('333');
+      end;}
+
+    if  ((pocketCountWWrite>=(NUM_BYTE_IN_GEOS_POCKET/2)) and
+        (pocketCountWWrite<=(NUM_BYTE_IN_GEOS_POCKET/2+NUM_SLOW_CHANAL-1))) then
+        begin
+          //записываем данные медленных
+          arrSlowParam[pocketOffset]:=2056{Random(High(word))};
+          WriteByteToByte(arrSlowParam[pocketOffset],arrayOfByte,iArrayOfByte);
+          inc(pocketOffset);
+          if pocketOffset>NUM_SLOW_CHANAL then
+            begin
+              pocketOffset:=1;
+            end;
+
+        end
+    else
+        begin
+          flag:=false;
+
+          //проверяем нужно ли писать данные с ГЕОС каждые 2000 пакетов
+          //koef-коэфициент масштабирования 1..N, для правильной выборки
+          if (pocketCountWWrite mod (NUM_POCKET_IN_SEC*koef+(pocketOffset-1)))=0 then
+            begin
+              WriteByteToByte(wordArr[wordCount],arrayOfByte,iArrayOfByte);
+              inc(wordCount);
+              inc(pocketOffset);
+              if wordCount>length(wordArr)-1 then
+                begin
+                  wordCount:=0;
+                  pocketOffset:=1;
+                  inc(koef);
+                end;
+              flag:=true;
+            end;
+
+
+           {if pocketCountWWrite=460 then
+            begin
+              ShowMessage('333');
+            end;}
+
+            //проверяем не пора ли вставить данные медленных через каждые 260 пакетов
+            if (pocketCountWWrite mod (round(NUM_POCKET_IN_SEC/SAMPLING_FREQ_SLOW)*koefVibSlowP+
+                  round(NUM_BYTE_IN_GEOS_POCKET/2)+(pocketOffsetSlowP-1)))=0 then
+              begin
+                arrSlowParam[pocketOffsetSlowP]:=2056{Random(High(word))};
+                WriteByteToByte(arrSlowParam[pocketOffsetSlowP],arrayOfByte,iArrayOfByte);
+                inc(pocketOffsetSlowP);
+                if pocketOffsetSlowP>NUM_SLOW_CHANAL then
+                  begin
+                    pocketOffsetSlowP:=1;
+                    inc(koefVibSlowP);
+                  end;
+                flag:=true;
+              end;
+
+            {if pocketCountWWrite=260 then
+              begin
+                ShowMessage('333');
+              end;}
+
+
+            if (not flag) then
+              begin
+                //двухбайтовый 0 для записи. В случае если в этих пакетах данные передаваться не должны
+                wordNull:=0;
+                WriteByteToByte(wordNull,arrayOfByte,iArrayOfByte);
+              end;
+
+        end;
+  end;
+inc(pocketCountWWrite);
+//проверка на переполнения
+if pocketCountWWrite>High(pocketCountWWrite) then
+  begin
+    pocketCountWWrite:=0;
   end;
 inc(pocketC);
 end;
@@ -442,12 +774,21 @@ pocketCount:=0;
 pocketCountWWrite:=0;
 dataCount:=1;
 countWriteByteInFile:=0;
+koef:=1;
+koefVibSlowP:=1;
+
 end;
 
 procedure TSignalGenForm.startGenClick(Sender: TObject);
 begin
 if SignalGenForm.startGen.Caption='Gen' then
     begin
+      //предустановочные значения
+      pocketOffset:=1;
+      pocketOffsetSlowP:=1;
+      countReadSlowP:=1;
+      timeCount:=0;
+
       SignalGenForm.startGen.Caption:='Stop';
       ShowMessage('Введите название файла сигнала');
       if SignalGenForm.SaveDialog1.Execute then
@@ -508,7 +849,7 @@ begin
             begin
               countWriteByteInFile:=0;
             end;
-          
+
           pocketCount:=0;
         end;
 
